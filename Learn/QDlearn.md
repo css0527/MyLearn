@@ -130,3 +130,53 @@ armor_detector_params.yaml:8 现在是 device: "CPU"，OpenVINO 跑 1280×1024 �
 把 camera_6mm.acquisition_frame_rate 降到 30~60（调试期足够，也顺带解决 raw 带宽问题）；
 或者给 YOLO 换更小的输入尺寸 / 量化模型（这块要看模型文件）。
 2. exit code -11（段错误）每次都稳定复现，发生在 HikCameraNode destroyed! 之后、进程退出阶段。这是 shutdown 时的析构 bug（很可能是相机节点/状态机里某个对象被析构两次，或 capture_thread_ 还在用已释放的资源）。不影响运行，但建议尽早查，否则每次退出都崩。
+
+## OpenVINO
+这个项目已经写了推理模式 —— 就是 OpenVINO 推理（不是 OpenCV DNN）。YOLO 检测在 yolov5_detector.cpp 里用 openvino::runtime（read_model → PrePostProcessor → compile_model → infer()），输入是 model/IR/0526.xml/.bin。所以不需要从零写，问题只在设备被写死成 CPU + 同步推理，导致"卡"。
+
+实测瓶颈（MIX2是 i7-13620H 带 Iris Xe 核显）
+设备	   平均延迟	    吞吐
+CPU	       11.31 ms	  85.66 FPS
+GPU（核显）	6.36 ms	   149.14 FPS
+
+GPU 快约 1.8 倍。核显之前用不了，是因为 pixi 环境的 ocl-icd 只搜 .pixi/envs/default/etc/OpenCL/vendors/（空的），找不到系统的 /etc/OpenCL/vendors/intel.icd，OpenVINO 报 "no supported devices found"。
+
+改动:
+让 GPU 能被找到 —— 加了 OCL_ICD_VENDORS=/etc/OpenCL/vendors，分别写入：
+bringup_SingleProcess.launch.py（和已有的 LD_LIBRARY_PATH 处理放一起）
+start_vision.sh 和 launch_complete.sh
+设备切到 GPU —— armor_detector_params.yaml:8 device: "CPU" → "GPU"
+GPU 失败自动回退 CPU —— armor_detector_node.cpp 的 initYoloDetector() 加了 try/catch，编译失败会用 CPU 重试并打日志。
+
+还想更快的话
+异步推理 + 双缓冲（start_async/wait）：能再提吞吐，但会多 ~1 帧延迟。对自瞄来说低延迟比高帧率更重要，所以建议保持现在的同步推理。
+降输入分辨率：640×640 → 416×416 能再快很多，但需要重新导出/训练模型，不在这次范围内。
+你现在把 yolo.conf_threshold 从 0.65 调高一点也能减少后处理/NMS 压力，但会影响召回。
+
+## 核显后还卡
+日志里 YOLOv5 detector running on device: GPU —— 说明推理已经成功切到核显，没回退 CPU。所以"卡"现在不是推理问题了。
+
+"卡"的真正原因：可视化带宽
+相机发布的是 image_raw，是 1440×1080 的原始 RGB8 图（每帧 4.66 MB）：
+
+30 FPS ≈ 140 MB/s
+100 FPS ≈ 466 MB/s
+这么多原始数据要通过 DDS 序列化发给可视化工具（foxglove / rqt / rviz），工具要收、解码、渲染，画面自然就"卡"。而且这是纯带宽问题——跟帧率高低无关，所以你 30 和 100 帧都卡。
+
+改动
+把相机驱动 hik_camera_node.cpp 的图像发布从普通 Publisher 换成 image_transport，这样会自动多出一个 /image_raw/compressed（JPEG 压缩） 主题，体积从 4.66 MB 降到约 0.2 MB（约 20 倍）。hik_camera 已重新编译通过。
+
+需要做的（关键一步）
+重新启动后，可视化工具订阅 /image_raw/compressed 而不是 /image_raw：
+
+Foxglove：直接搜索 compressed，一般会自动优先用压缩主题。
+rqt_image_view：下拉里选 /image_raw/compressed。
+RViz：Image 显示里 topic 填 /image_raw/compressed（Transport hint 选 compressed）。
+/image_raw（原始）我保留了，因为 armor_detector 还在进程内用它做检测（零拷贝，不吃带宽）。只是你看的时候别再看它了。
+
+想进一步压带宽（可选）
+JPEG 质量默认 80，想更省可以把 image_transport 的压缩参数调低，例如启动时加：
+
+ros2 param set /camera_driver image_transport.compressed.jpeg_quality 50
+一句话总结：推理已在 GPU（核显）跑，画面卡是"看原始大图"撑爆带宽，现在有压缩主题了，换个 topic 看就不卡了。
+
