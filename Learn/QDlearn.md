@@ -95,6 +95,7 @@ docker-compose 那条挂载，如果平时是在容器里跑（/ros_ws），确�
 当前的 shell 是 (rmvision) conda 环境，而 launch 里 LD_PRELOAD 指向的是 pixi 的 libstdc++.so.6。
 
 ## 画面延迟高
+先检查相機是否插到USB3.0口
 带宽问题：图像以未压缩的原始格式、全分辨率、100Hz 在发，可视化根本跟不上。
 
 证据链
