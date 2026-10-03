@@ -181,3 +181,5 @@ JPEG 质量默认 80，想更省可以把 image_transport 的压缩参数调低�
 ros2 param set /camera_driver image_transport.compressed.jpeg_quality 50
 一句话总结：推理已在 GPU（核显）跑，画面卡是"看原始大图"撑爆带宽，现在有压缩主题了，换个 topic 看就不卡了。
 
+## 云台跟随问题
+
